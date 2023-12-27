@@ -1,0 +1,39 @@
+from pathlib import Path
+
+#####################################################################
+# Executable Config
+#####################################################################
+
+# path to the `streamlink` executable
+streamlink = "streamlink"
+
+# path to the `ffmpeg` executable
+ffmpeg = "ffmpeg"
+
+# path to the `ffprobe` executable
+ffprobe = "ffprobe"
+
+
+#####################################################################
+# Folder Config
+#####################################################################
+
+# path to the directory to write logs to
+logging_dir = Path(__file__).parent.joinpath("logs")
+
+# path to the directory to save videos to
+storage_dir = Path("~/Videos/Twitch")
+
+
+#####################################################################
+# Twitch Config
+#####################################################################
+
+# Twitch API Client ID (required, see README)
+client_id = ""
+
+# Twitch API Client Secret (required, see README)
+client_secret = ""
+
+# Twitch User OAuth Token (optional, see README)
+oauth_token = ""
