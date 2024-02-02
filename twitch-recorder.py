@@ -15,6 +15,7 @@ import config
 from recorder.data.ffmetadata import FFMetadata, FFChapter
 from recorder.data.twitch import Stream, StreamResponse, OAuthToken
 from recorder.ffmpeg import FFMpegRecorder
+from recorder.streamlink import Streamlink
 from recorder.poller import Poller
 
 
@@ -29,18 +30,17 @@ class TwitchResponseStatus(enum.Enum):
 class TwitchRecorder:
     def __init__(self) -> None:
         # session confguration
-        self.root_path = Path(config.storage_dir)
         self.username = ""
-        self.refresh = 15
-
-        # streamlink configuration
-        self.quality = "best"
+        self.recorded_dir = Path(config.storage_dir).joinpath("recorded")
+        self.processed_dir = Path(config.storage_dir).joinpath("processed")
+        self.stream_poll_interval = 15
+        self.metadata_poll_interval = 30
 
         # twitch configuration
-        self.client_id = config.client_id
-        self.client_secret = config.client_secret
         self.oauth_url = "https://id.twitch.tv/oauth2/token"
         self.api_url = "https://api.twitch.tv/helix/streams"
+        self.client_id = config.client_id
+        self.client_secret = config.client_secret
         self.access_token = ""
         self.oauth_token = config.oauth_token
 
@@ -57,7 +57,6 @@ class TwitchRecorder:
             headers = {"Client-ID": self.client_id, "Authorization": f"Bearer {self.access_token}"}
             r = requests.get(f"{self.api_url}?user_login={self.username}", headers=headers, timeout=15)
             r.raise_for_status()
-
             stream = StreamResponse.create(**r.json())
             if stream.data:
                 status = TwitchResponseStatus.ONLINE
@@ -71,16 +70,13 @@ class TwitchRecorder:
                     status = TwitchResponseStatus.BAD_REQUEST
                 if e.response.status_code == 401:
                     status = TwitchResponseStatus.UNAUTHORIZED
+                else:
+                    status = TwitchResponseStatus.ERROR
         except Exception as e:
             logging.error("unexpected error: %s", e)
             status = TwitchResponseStatus.ERROR
         return status, info
 
-    def record_stream(self, video_dst_path: Path) -> None:
-        options = []
-        if self.oauth_token != "":
-            options.append(f"--twitch-api-header=Authorization=OAuth {self.oauth_token}")
-        subprocess.run([config.streamlink, "--twitch-disable-ads", *options, "--output", video_dst_path, f"twitch.tv/{self.username}", self.quality])
 
     def process_recorded_file(self, recorded_video_path: Path, processed_video_path: Path) -> None:
         recorded_metadata_path = recorded_video_path.with_suffix(".json")
@@ -112,9 +108,9 @@ class TwitchRecorder:
         logging.info("writing updated metadata to %s", processed_metadata_path)
         metadata.append_ffmetadata(processed_metadata_path)
 
-        # fix errors in the recorded video and add the aggregated metadata
+        # add the aggregated metadata
         logging.info("fixing %s", recorded_video_path)
-        FFMpegRecorder.fix_video_errors(recorded_video_path, processed_metadata_path, processed_video_path)
+        FFMpegRecorder.process_video(recorded_video_path, processed_metadata_path, processed_video_path)
 
         # copy new metadata to the folder
         shutil.copy(recorded_metadata_path, processed_metadata_path)
@@ -124,123 +120,110 @@ class TwitchRecorder:
         recorded_metadata_path.unlink()
         processed_metadata_path.unlink()
 
-    async def poll_stream_metadata(self, metadata: FFMetadata, metadata_path: Path) -> None:
+    async def poll_metadata(self, metadata: FFMetadata, metadata_path: Path) -> None:
         prev_stream = Stream()
         while True:
             status, stream = self.fetch_stream()
             currtime = time.time()
-            if status == TwitchResponseStatus.UNAUTHORIZED:
-                logging.error("unauthorized, attempting to log back in")
-                self.access_token = self.fetch_access_token()
-            elif status == TwitchResponseStatus.ONLINE:
-                if prev_stream.game_name != stream.game_name:
-                    logging.info("setting current game to %s", stream.game_name)
-                    metadata.categories.append(FFChapter(title=stream.game_name, time=currtime))
-                    FFMetadata.dump(metadata, metadata_path)
-                if prev_stream.title != stream.title:
-                    logging.info("setting current stream title to %s", stream.title)
-                    metadata.titles.append(FFChapter(title=stream.title, time=currtime))
-                    FFMetadata.dump(metadata, metadata_path)
-                prev_stream = stream
-                await asyncio.sleep(0)
-            else:
-                logging.error("unexpected status %s, retrying in %d seconds", status, self.refresh)
-                await asyncio.sleep(0)
+            match status:
+                case TwitchResponseStatus.UNAUTHORIZED:
+                    logging.error("unauthorized, attempting to log back in")
+                    self.access_token = self.fetch_access_token()
+                case TwitchResponseStatus.ONLINE:
+                    if prev_stream.game_name != stream.game_name:
+                        logging.info("setting current game to %s", stream.game_name)
+                        metadata.categories.append(FFChapter(title=stream.game_name, time=currtime))
+                        FFMetadata.dump(metadata, metadata_path)
+                    if prev_stream.title != stream.title:
+                        logging.info("setting current stream title to %s", stream.title)
+                        metadata.titles.append(FFChapter(title=stream.title, time=currtime))
+                        FFMetadata.dump(metadata, metadata_path)
+                    prev_stream = stream
+                    await asyncio.sleep(0)
+                case _:
+                    logging.error("unexpected status %s while polling metadata, retrying in %d seconds", status, self.metadata_poll_interval)
+                    await asyncio.sleep(0)
 
-    def loop_check(self, recorded_dir: Path, processed_dir: Path) -> None:
+    def poll_stream(self) -> None:
         self.access_token = self.fetch_access_token()
         while True:
             status, stream = self.fetch_stream()
-            if status == TwitchResponseStatus.BAD_REQUEST:
-                logging.error("bad request")
-                raise Exception(f"twitch API returned bad request error for {self.username}")
-            elif status == TwitchResponseStatus.UNAUTHORIZED:
-                logging.info("unauthorized, attempting to log back in")
-                self.access_token = self.fetch_access_token()
-            elif status == TwitchResponseStatus.OFFLINE:
-                logging.debug("%s currently offline, checking again in %s seconds", self.username, self.refresh)
-                time.sleep(self.refresh)
-            elif status == TwitchResponseStatus.ONLINE:
-                logging.info("%s is online, stream recording in session", self.username)
+            match status:
+                case TwitchResponseStatus.UNAUTHORIZED:
+                    logging.info("unauthorized, attempting to log back in")
+                    self.access_token = self.fetch_access_token()
+                case TwitchResponseStatus.OFFLINE:
+                    logging.debug("%s currently offline, checking again in %s seconds", self.username, self.stream_poll_interval)
+                    time.sleep(self.stream_poll_interval)
+                case TwitchResponseStatus.ONLINE:
+                    logging.info("%s is online, stream recording in session", self.username)
 
-                video_filename = f"{stream.user_login}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{stream.id}"
-                video_title = stream.title
-                video_author = stream.user_name
-                video_description = f"Streamed on {stream.started_at.strftime('%Y-%m-%d %H:%M:%S %Z')} at twitch.tv/{stream.user_login}"
+                    video_filename = f"{stream.user_login}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{stream.id}"
+                    video_title = stream.title
+                    video_author = stream.user_name
+                    video_description = f"Streamed on {stream.started_at.strftime('%Y-%m-%d %H:%M:%S %Z')} at twitch.tv/{stream.user_login}"
 
-                recorded_path = recorded_dir.joinpath(f"{video_filename}.mp4")
-                processed_path = processed_dir.joinpath(f"{video_filename}.mp4")
-                metadata_path = recorded_dir.joinpath(f"{video_filename}.json")
+                    recorded_path = self.recorded_dir.joinpath(f"{video_filename}.mp4")
+                    processed_path = self.processed_dir.joinpath(f"{video_filename}.mp4")
+                    metadata_path = self.recorded_dir.joinpath(f"{video_filename}.json")
 
-                # write metadata to file
-                metadata = FFMetadata(title=video_title, author=video_author, description=video_description, id=stream.id)
-                FFMetadata.dump(metadata, metadata_path)
+                    # write metadata to file
+                    metadata = FFMetadata(title=video_title, author=video_author, description=video_description, id=stream.id)
+                    FFMetadata.dump(metadata, metadata_path)
 
-                # poll for stream metadata on a separate thread
-                poller = Poller(target=functools.partial(self.poll_stream_metadata, metadata, metadata_path), interval=self.refresh)
+                    # poll for stream metadata on a separate thread
+                    poller = Poller(target=functools.partial(self.poll_metadata, metadata, metadata_path), interval=self.metadata_poll_interval)
 
-                # run metadata poller and streamlink
-                logging.info("recording stream to %s", recorded_path)
-                poller.start()
-                self.record_stream(recorded_path)
-                poller.stop()
+                    # run metadata poller and streamlink
+                    logging.info("recording stream to %s", recorded_path)
+                    poller.start()
+                    Streamlink.record_stream(self.username, recorded_path)
+                    poller.stop()
 
-                # process the recorded video file
-                logging.info("stream finished recording, processing video")
-                if recorded_path.exists():
+                    # process the recorded video file
+                    logging.info("stream finished recording, processing video")
                     try:
                         self.process_recorded_file(recorded_path, processed_path)
+                        logging.info("finished processing video, returning to polling")
                     except Exception as e:
-                        logging.error("skipped processing video %s, encountered exception: %s", recorded_path, e)
-                else:
-                    logging.warning("skipped processing, recorded video does not exist")
-                logging.info("finished processing, returning to polling")
-            else:
-                logging.error("unexpected status %s, retrying in %d seconds", status, self.refresh)
-                time.sleep(self.refresh)
+                        logging.error("skipped processing video, encountered exception: %s", e)
+                case _:
+                    logging.error("unexpected status %s while polling stream, retrying in %d seconds", status, self.stream_poll_interval)
+                    time.sleep(self.stream_poll_interval)
 
     def run(self) -> None:
-        # path to recorded streams
-        recorded_path = self.root_path.joinpath("recorded", self.username)
-
-        # path to finished videos with errors removed
-        processed_path = self.root_path.joinpath("processed", self.username)
-
-        # create video directories if they do not exist
-        if not recorded_path.is_dir():
-            recorded_path.mkdir(parents=True, exist_ok=True)
-        if not processed_path.is_dir():
-            processed_path.mkdir(parents=True, exist_ok=True)
-
-        # make sure the interval to check user availability is not less than 15 seconds
-        if self.refresh < 15:
-            logging.warning("stream polling interval should not be less than 15 seconds")
-            self.refresh = 15
-            logging.info("set polling interval to 15 seconds")
+        # setup storage directory   
+        self.recorded_dir = Path(config.storage_dir).joinpath("recorded", self.username)
+        self.processed_dir = Path(config.storage_dir).joinpath("processed", self.username)
+        if not self.recorded_dir.is_dir():
+            self.recorded_dir.mkdir(parents=True, exist_ok=True)
+        if not self.processed_dir.is_dir():
+            self.processed_dir.mkdir(parents=True, exist_ok=True)
 
         # fix videos from previous recording session
-        video_list = [f for f in recorded_path.iterdir() if f.is_file() and f.suffix == ".mp4"]
-        if len(video_list) > 0:
+        print(self.recorded_dir)
+        videos = [p for p in self.recorded_dir.iterdir() if p.is_file() and p.suffix == ".mp4"]
+        if len(videos) > 0:
             logging.info("processing previously recorded files")
-        for f in video_list:
-            recorded_filename = recorded_path.joinpath(f.name)
-            processed_filename = processed_path.joinpath(f.name)
+        for video_path in videos:
+            recorded_filepath = self.recorded_dir.joinpath(video_path.name)
+            processed_filepath = self.processed_dir.joinpath(video_path.name)
             try:
-                self.process_recorded_file(recorded_filename, processed_filename)
+                self.process_recorded_file(recorded_filepath, processed_filepath)
             except Exception as e:
-                logging.error("skipping video %s, encountered exception: %s", f, e)
+                logging.error("skipped processing %s, encountered exception: %s", video_path, e)
 
-        # run polling loop
-        logging.info("polling stream for %s every %s seconds, recording with %s quality", self.username, self.refresh, self.quality)
-        self.loop_check(recorded_path, processed_path)
+        # poll for streams
+        logging.info("polling stream for %s every %s seconds, recording with %s quality", self.username, self.stream_poll_interval, Streamlink.quality)
+        self.poll_stream()
 
 
 def main(argv) -> int:
-    usage_hint = "twitch-recorder.py -u <username> [-q <quality>] [-r <refresh>] [-l <log level>]"
+    usage_hint = "twitch-recorder.py -u <username> [-l <log level>]"
     logging.basicConfig(level=logging.INFO, handlers=[])
 
     try:
-        opts, _ = getopt.getopt(argv, "hu:q:l:r:", ["help", "username=", "quality=", "log=", "refresh="])
+        opts, _ = getopt.getopt(argv, "hu:l:", ["help", "username=",  "log="])
     except getopt.GetoptError:
         print(usage_hint)
         return 2
@@ -253,8 +236,6 @@ def main(argv) -> int:
             return 0
         elif opt in ("-u", "--username"):
             twitch_recorder.username = arg.lower()
-        elif opt in ("-q", "--quality"):
-            twitch_recorder.quality = arg
         elif opt in ("-l", "--logging"):
             logging_level = getattr(logging, arg.upper(), None)
             if not isinstance(logging_level, int):
@@ -262,14 +243,18 @@ def main(argv) -> int:
                 print(f"Invalid log level: {arg.upper()}")
                 return 2
             logging.getLogger().setLevel(logging_level)
-            print("log level set to {arg.upper()}")
-        elif opt in ("-r", "--refresh"):
-            twitch_recorder.refresh = int(arg)
+            print(f"log level set to {arg.upper()}")
 
     # check mandatory args
     if twitch_recorder.username == "":
         print(usage_hint)
         return 2
+    
+    # check executables
+    for exe in [config.ffmpeg, config.ffprobe, config.streamlink]:
+        if shutil.which(exe) is None:
+            print(f"Could not find executable: {exe}")
+            return 1
 
     # setup logging
     config.logging_dir.mkdir(parents=True, exist_ok=True)
@@ -284,7 +269,6 @@ def main(argv) -> int:
     twitch_recorder.run()
     return 0
 
-
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
@@ -292,5 +276,5 @@ if __name__ == "__main__":
         logging.info("keyboard interrupt received by main thread, exiting")
         sys.exit(0)
     except Exception as e:
-        logging.exception("unrecoverable exception: %s")
+        logging.exception("unrecoverable exception: %s", e)
         sys.exit(1)

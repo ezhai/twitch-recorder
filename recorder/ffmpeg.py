@@ -6,7 +6,7 @@ import config
 
 class FFMpegRecorder:
     """
-    Utilities to abstract calls to ffmpeg.
+    Utility class to wrap around ffmpeg.
     """
 
     @staticmethod
@@ -20,6 +20,6 @@ class FFMpegRecorder:
         return float(res.stdout.strip())
 
     @staticmethod
-    def fix_video_errors(video_src_path: Path, metadata_src_path: Path, video_dst_path: Path) -> None:
+    def process_video(video_src_path: Path, metadata_src_path: Path, video_dst_path: Path) -> None:
         subprocess.run([config.ffmpeg, "-v", "error", "-i", video_src_path,  "-i", metadata_src_path,
-                        "-map_metadata", "1", "-err_detect", "ignore_err", "-c", "copy", video_dst_path], check=True)
+                        "-map_metadata", "1", "-c", "copy", video_dst_path], check=True)
