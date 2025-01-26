@@ -5,7 +5,6 @@ import getopt
 import logging
 import requests
 import shutil
-import subprocess
 import sys
 import time
 from datetime import datetime
@@ -45,7 +44,10 @@ class TwitchRecorder:
         self.oauth_token = config.oauth_token
 
     def fetch_access_token(self) -> str:
-        r = requests.post(f"{self.oauth_url}?client_id={self.client_id}&client_secret={self.client_secret}&grant_type=client_credentials", timeout=15)
+        r = requests.post(
+            f"{self.oauth_url}?client_id={self.client_id}&client_secret={self.client_secret}&grant_type=client_credentials",
+            timeout=15,
+        )
         r.raise_for_status()
         token = OAuthToken.create(**r.json())
         return token.access_token
@@ -54,8 +56,15 @@ class TwitchRecorder:
         info = Stream.create()
         status = TwitchResponseStatus.ERROR
         try:
-            headers = {"Client-ID": self.client_id, "Authorization": f"Bearer {self.access_token}"}
-            r = requests.get(f"{self.api_url}?user_login={self.username}", headers=headers, timeout=15)
+            headers = {
+                "Client-ID": self.client_id,
+                "Authorization": f"Bearer {self.access_token}",
+            }
+            r = requests.get(
+                f"{self.api_url}?user_login={self.username}",
+                headers=headers,
+                timeout=15,
+            )
             r.raise_for_status()
             stream = StreamResponse.create(**r.json())
             if stream.data:
@@ -76,7 +85,6 @@ class TwitchRecorder:
             logging.error("unexpected error: %s", e)
             status = TwitchResponseStatus.ERROR
         return status, info
-
 
     def process_recorded_file(self, recorded_video_path: Path, processed_video_path: Path) -> None:
         recorded_metadata_path = recorded_video_path.with_suffix(".json")
@@ -141,7 +149,11 @@ class TwitchRecorder:
                     prev_stream = stream
                     await asyncio.sleep(0)
                 case _:
-                    logging.error("unexpected status %s while polling metadata, retrying in %d seconds", status, self.metadata_poll_interval)
+                    logging.error(
+                        "unexpected status %s while polling metadata, retrying in %d seconds",
+                        status,
+                        self.metadata_poll_interval,
+                    )
                     await asyncio.sleep(0)
 
     def poll_stream(self) -> None:
@@ -153,7 +165,11 @@ class TwitchRecorder:
                     logging.info("unauthorized, attempting to log back in")
                     self.access_token = self.fetch_access_token()
                 case TwitchResponseStatus.OFFLINE:
-                    logging.debug("%s currently offline, checking again in %s seconds", self.username, self.stream_poll_interval)
+                    logging.debug(
+                        "%s currently offline, checking again in %s seconds",
+                        self.username,
+                        self.stream_poll_interval,
+                    )
                     time.sleep(self.stream_poll_interval)
                 case TwitchResponseStatus.ONLINE:
                     logging.info("%s is online, stream recording in session", self.username)
@@ -168,11 +184,19 @@ class TwitchRecorder:
                     metadata_path = self.recorded_dir.joinpath(f"{video_filename}.json")
 
                     # write metadata to file
-                    metadata = FFMetadata(title=video_title, author=video_author, description=video_description, id=stream.id)
+                    metadata = FFMetadata(
+                        title=video_title,
+                        author=video_author,
+                        description=video_description,
+                        id=stream.id,
+                    )
                     FFMetadata.dump(metadata, metadata_path)
 
                     # poll for stream metadata on a separate thread
-                    poller = Poller(target=functools.partial(self.poll_metadata, metadata, metadata_path), interval=self.metadata_poll_interval)
+                    poller = Poller(
+                        target=functools.partial(self.poll_metadata, metadata, metadata_path),
+                        interval=self.metadata_poll_interval,
+                    )
 
                     # run metadata poller and streamlink
                     logging.info("recording stream to %s", recorded_path)
@@ -188,11 +212,15 @@ class TwitchRecorder:
                     except Exception as e:
                         logging.error("skipped processing video, encountered exception: %s", e)
                 case _:
-                    logging.error("unexpected status %s while polling stream, retrying in %d seconds", status, self.stream_poll_interval)
+                    logging.error(
+                        "unexpected status %s while polling stream, retrying in %d seconds",
+                        status,
+                        self.stream_poll_interval,
+                    )
                     time.sleep(self.stream_poll_interval)
 
     def run(self) -> None:
-        # setup storage directory   
+        # setup storage directory
         self.recorded_dir = Path(config.storage_dir).joinpath("recorded", self.username)
         self.processed_dir = Path(config.storage_dir).joinpath("processed", self.username)
         if not self.recorded_dir.is_dir():
@@ -214,7 +242,12 @@ class TwitchRecorder:
                 logging.error("skipped processing %s, encountered exception: %s", video_path, e)
 
         # poll for streams
-        logging.info("polling stream for %s every %s seconds, recording with %s quality", self.username, self.stream_poll_interval, Streamlink.quality)
+        logging.info(
+            "polling stream for %s every %s seconds, recording with %s quality",
+            self.username,
+            self.stream_poll_interval,
+            Streamlink.quality,
+        )
         self.poll_stream()
 
 
@@ -223,7 +256,7 @@ def main(argv) -> int:
     logging.basicConfig(level=logging.INFO, handlers=[])
 
     try:
-        opts, _ = getopt.getopt(argv, "hu:l:", ["help", "username=",  "log="])
+        opts, _ = getopt.getopt(argv, "hu:l:", ["help", "username=", "log="])
     except getopt.GetoptError:
         print(usage_hint)
         return 2
@@ -249,7 +282,7 @@ def main(argv) -> int:
     if twitch_recorder.username == "":
         print(usage_hint)
         return 2
-    
+
     # check executables
     for exe in [config.ffmpeg, config.ffprobe, config.streamlink]:
         if shutil.which(exe) is None:
@@ -268,6 +301,7 @@ def main(argv) -> int:
     # run twitch recorder
     twitch_recorder.run()
     return 0
+
 
 if __name__ == "__main__":
     try:
