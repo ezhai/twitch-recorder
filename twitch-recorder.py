@@ -32,8 +32,9 @@ class TwitchRecorder:
         self.username = ""
         self.recorded_dir = Path(config.storage_dir).joinpath("recorded")
         self.processed_dir = Path(config.storage_dir).joinpath("processed")
-        self.stream_poll_interval = 15
+        self.stream_poll_interval = 10
         self.metadata_poll_interval = 30
+        self.vod_processor_poll_interval = 600
 
         # twitch configuration
         self.oauth_url = "https://id.twitch.tv/oauth2/token"
@@ -86,7 +87,7 @@ class TwitchRecorder:
             status = TwitchResponseStatus.ERROR
         return status, info
 
-    def process_recorded_file(self, recorded_video_path: Path, processed_video_path: Path) -> None:
+    def process_recorded_vod(self, recorded_video_path: Path, processed_video_path: Path) -> None:
         recorded_metadata_path = recorded_video_path.with_suffix(".json")
         processed_metadata_path = processed_video_path.with_suffix(".json")
 
@@ -127,6 +128,21 @@ class TwitchRecorder:
         recorded_video_path.unlink()
         recorded_metadata_path.unlink()
         processed_metadata_path.unlink()
+
+    async def poll_process_vods(self) -> None:
+        while True:
+            videos = [p for p in self.recorded_dir.iterdir() if p.is_file() and p.suffix == ".mp4"]
+            if len(videos) > 0:
+                logging.info("processing previously recorded files")
+            for video_path in videos:
+                recorded_filepath = self.recorded_dir.joinpath(video_path.name)
+                processed_filepath = self.processed_dir.joinpath(video_path.name)
+                try:
+                    logging.info("processing %s", video_path)
+                    self.process_recorded_vod(recorded_filepath, processed_filepath)
+                except Exception as e:
+                    logging.error("skipped processing %s, encountered exception: %s", video_path, e)
+            await asyncio.sleep(0)
 
     async def poll_metadata(self, metadata: FFMetadata, metadata_path: Path) -> None:
         prev_stream = Stream()
@@ -180,7 +196,6 @@ class TwitchRecorder:
                     video_description = f"Streamed on {stream.started_at.strftime('%Y-%m-%d %H:%M:%S %Z')} at twitch.tv/{stream.user_login}"
 
                     recorded_path = self.recorded_dir.joinpath(f"{video_filename}.mp4")
-                    processed_path = self.processed_dir.joinpath(f"{video_filename}.mp4")
                     metadata_path = self.recorded_dir.joinpath(f"{video_filename}.json")
 
                     # write metadata to file
@@ -203,14 +218,6 @@ class TwitchRecorder:
                     poller.start()
                     Streamlink.record_stream(self.username, recorded_path)
                     poller.stop()
-
-                    # process the recorded video file
-                    logging.info("stream finished recording, processing video")
-                    try:
-                        self.process_recorded_file(recorded_path, processed_path)
-                        logging.info("finished processing video, returning to polling")
-                    except Exception as e:
-                        logging.error("skipped processing video, encountered exception: %s", e)
                 case _:
                     logging.error(
                         "unexpected status %s while polling stream, retrying in %d seconds",
@@ -229,17 +236,11 @@ class TwitchRecorder:
             self.processed_dir.mkdir(parents=True, exist_ok=True)
 
         # fix videos from previous recording session
-        print(self.recorded_dir)
-        videos = [p for p in self.recorded_dir.iterdir() if p.is_file() and p.suffix == ".mp4"]
-        if len(videos) > 0:
-            logging.info("processing previously recorded files")
-        for video_path in videos:
-            recorded_filepath = self.recorded_dir.joinpath(video_path.name)
-            processed_filepath = self.processed_dir.joinpath(video_path.name)
-            try:
-                self.process_recorded_file(recorded_filepath, processed_filepath)
-            except Exception as e:
-                logging.error("skipped processing %s, encountered exception: %s", video_path, e)
+        poller = Poller(
+            target=self.poll_process_vods,
+            interval=self.metadata_poll_interval,
+        )
+        poller.start()
 
         # poll for streams
         logging.info(
@@ -249,6 +250,7 @@ class TwitchRecorder:
             Streamlink.quality,
         )
         self.poll_stream()
+        poller.stop()
 
 
 def main(argv) -> int:

@@ -27,7 +27,8 @@ python twitch-recorder.py -u <username>
 
 _Tip: If your operating system uses a package manager, use that to install the prerequisite programs._
 
-Confirm that the executables are installed. If the your executable is named differently or is not on your PATH, use that name instead (e.g. `C:\\bin\ffmpeg.exe`).
+Confirm that the executables are installed. If the your executable is named differently or is not on your PATH, use
+that name instead (e.g. `C:\\bin\ffmpeg.exe`).
 
 ```
 python --version
@@ -50,11 +51,16 @@ Copy `config.py.template` to `config.py`. Edit the configuration variables in `c
 
 ### Twitch API Credentials (required)
 
-Login to the [Twitch Developer Console](https://dev.twitch.tv/console/apps) and register an application. After your application is created, you can retrieve the Client ID and Secret from the app page.
+Login to the [Twitch Developer Console](https://dev.twitch.tv/console/apps) and register an application. After your
+application is created, you can retrieve the Client ID and Secret from the app page.
 
 ### Twitch OAuth Token (optional)
 
-By default, ad segments will be filtered out of the recorded video leaving a discontinuity in your video. Your Twitch OAuth Token can be used with Streamlink to avoid having these discontinuities by completely bypass ads if you are subscribed to the channel you are recording or have Twitch Turbo. Login to [twitch.tv](https://twitch.tv/), open the browser console using _F12_ or _Ctrl+Shift+I_ and paste the following command into the console. This is the token used by Twitch to authenticate your Twitch account, so be careful with it.
+By default, ad segments will be filtered out of the recorded video leaving a discontinuity in your video. Your Twitch
+OAuth Token can be used with Streamlink to avoid having these discontinuities by completely bypass ads if you are
+subscribed to the channel you are recording or have Twitch Turbo. Login to [twitch.tv](https://twitch.tv/), open the
+browser console using _F12_ or _Ctrl+Shift+I_ and paste the following command into the console. This is the token used
+by Twitch to authenticate your Twitch account, so be careful with it.
 
 ```
 document.cookie.split("; ").find(item=>item.startsWith("auth-token="))?.split("=")[1]
