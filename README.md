@@ -21,14 +21,12 @@ python twitch-recorder.py -u <username>
 
 ## Installation
 
-- [Python 3.11+](https://www.python.org/downloads/)
-- [Streamlink](https://github.com/ancalentari/twitch-stream-recorder)
+- [Python 3.11+](https://wiki.python.org/moin/BeginnersGuide/Download)
+- [Streamlink](https://streamlink.github.io/install.html)
 - [FFmpeg](https://ffmpeg.org/download.html) (dependency for streamlink)
 
-_Tip: If your operating system uses a package manager, use that to install the prerequisite programs._
-
-Confirm that the executables are installed. If the your executable is named differently or is not on your PATH, use
-that name instead (e.g. `C:\\bin\ffmpeg.exe`).
+Confirm that the executables are installed. If the your executable is named differently or is not on your PATH, either
+add it to the PATH or use the full path instead (e.g. `C:\\bin\ffmpeg.exe`).
 
 ```
 python --version

@@ -3,12 +3,14 @@ import enum
 import functools
 import getopt
 import logging
+import multiprocessing as mp
 import requests
 import shutil
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from requests.adapters import HTTPAdapter, Retry
 
 import config
 from recorder.data.ffmetadata import FFMetadata, FFChapter
@@ -34,7 +36,6 @@ class TwitchRecorder:
         self.processed_dir = Path(config.storage_dir).joinpath("processed")
         self.stream_poll_interval = 10
         self.metadata_poll_interval = 30
-        self.vod_processor_poll_interval = 600
 
         # twitch configuration
         self.oauth_url = "https://id.twitch.tv/oauth2/token"
@@ -44,12 +45,24 @@ class TwitchRecorder:
         self.access_token = ""
         self.oauth_token = config.oauth_token
 
+        # state
+        self.recording_lock = mp.Lock()
+
     def fetch_access_token(self) -> str:
-        r = requests.post(
+        s = requests.Session()
+        retries = Retry(total=5, backoff_factor=2, backoff_jitter=1, allowed_methods={"POST"})
+        s.mount("https://", HTTPAdapter(max_retries=retries))
+
+        r = s.post(
             f"{self.oauth_url}?client_id={self.client_id}&client_secret={self.client_secret}&grant_type=client_credentials",
             timeout=15,
         )
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except Exception as e:
+            logging.warning(f"could not get access token, retrying later: {e}")
+            return self.access_token
+
         token = OAuthToken.create(**r.json())
         return token.access_token
 
@@ -129,20 +142,22 @@ class TwitchRecorder:
         recorded_metadata_path.unlink()
         processed_metadata_path.unlink()
 
-    async def poll_process_vods(self) -> None:
-        while True:
-            videos = [p for p in self.recorded_dir.iterdir() if p.is_file() and p.suffix == ".mp4"]
-            if len(videos) > 0:
-                logging.info("processing previously recorded files")
-            for video_path in videos:
-                recorded_filepath = self.recorded_dir.joinpath(video_path.name)
-                processed_filepath = self.processed_dir.joinpath(video_path.name)
-                try:
-                    logging.info("processing %s", video_path)
-                    self.process_recorded_vod(recorded_filepath, processed_filepath)
-                except Exception as e:
-                    logging.error("skipped processing %s, encountered exception: %s", video_path, e)
-            await asyncio.sleep(0)
+    def process_recorded_vods(self) -> None:
+        if not self.recording_lock.acquire(block=False):
+            return
+        self.recording_lock.release()
+
+        videos = [p for p in self.recorded_dir.iterdir() if p.is_file() and p.suffix == ".mp4"]
+        if len(videos) > 0:
+            logging.info("processing previously recorded files")
+        for video_path in videos:
+            recorded_filepath = self.recorded_dir.joinpath(video_path.name)
+            processed_filepath = self.processed_dir.joinpath(video_path.name)
+            try:
+                logging.info("processing %s", video_path)
+                self.process_recorded_vod(recorded_filepath, processed_filepath)
+            except Exception as e:
+                logging.error("skipped processing %s, encountered exception: %s", video_path, e)
 
     async def poll_metadata(self, metadata: FFMetadata, metadata_path: Path) -> None:
         prev_stream = Stream()
@@ -190,7 +205,7 @@ class TwitchRecorder:
                 case TwitchResponseStatus.ONLINE:
                     logging.info("%s is online, stream recording in session", self.username)
 
-                    video_filename = f"{stream.user_login}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{stream.id}"
+                    video_filename = f"{stream.user_login}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{stream.id}"
                     video_title = stream.title
                     video_author = stream.user_name
                     video_description = f"Streamed on {stream.started_at.strftime('%Y-%m-%d %H:%M:%S %Z')} at twitch.tv/{stream.user_login}"
@@ -215,9 +230,15 @@ class TwitchRecorder:
 
                     # run metadata poller and streamlink
                     logging.info("recording stream to %s", recorded_path)
+                    self.recording_lock.acquire()
                     poller.start()
                     Streamlink.record_stream(self.username, recorded_path)
                     poller.stop()
+                    self.recording_lock.release()
+
+                    # process vods
+                    vod_processor = mp.Process(target=self.process_recorded_vods)
+                    vod_processor.start()
                 case _:
                     logging.error(
                         "unexpected status %s while polling stream, retrying in %d seconds",
@@ -236,11 +257,8 @@ class TwitchRecorder:
             self.processed_dir.mkdir(parents=True, exist_ok=True)
 
         # fix videos from previous recording session
-        poller = Poller(
-            target=self.poll_process_vods,
-            interval=self.metadata_poll_interval,
-        )
-        poller.start()
+        vod_processor = mp.Process(target=self.process_recorded_vods)
+        vod_processor.start()
 
         # poll for streams
         logging.info(
@@ -250,7 +268,7 @@ class TwitchRecorder:
             Streamlink.quality,
         )
         self.poll_stream()
-        poller.stop()
+        vod_processor.join()
 
 
 def main(argv) -> int:

@@ -8,17 +8,15 @@ T = TypeVar("T")
 
 class Poller:
     """
-        Poller is a concurrency construct to run an awaitable on a separate process.
+    Poller is a concurrency construct to run an awaitable on a separate process.
     """
 
     def __init__(self, target: Optional[Callable[[], Coroutine[Never, Never, T]]] = None, interval: int = 15) -> None:
         self.cv = mp.Condition(lock=mp.Lock())
-        self.chan: mp.Queue[T] = mp.Queue()
         self.proc = mp.Process(target=self.run_loop)
         self.terminate = mp.Event()
         self.target = target
         self.interval = interval
-        self.result: list[T] = []
 
     async def poll(self) -> None:
         if self.target is not None:
